@@ -2,6 +2,7 @@ from typing import Optional
 import html
 import os
 import textwrap
+from pathlib import Path
 
 import streamlit as st
 import requests
@@ -11,9 +12,9 @@ from download_service import (
     MANIFEST_PATH,
     PUBLIC_BASE_URL,
     build_download_url,
-    build_static_download_path,
     download_from_url,
     delete_transfer,
+    find_entry_by_stored_name,
     get_local_file_path,
     load_manifest,
     cleanup_orphan_files,
@@ -25,6 +26,11 @@ APP_NAME = "Streamlit File Downloader"
 APP_TAGLINE = "File Proxy Gateway"
 AUTHOR_NAME = "KaffeeCat"
 AUTHOR_URL = os.environ.get("AUTHOR_URL", "https://github.com/KaffeeCat").rstrip("/")
+
+
+@st.cache_data(show_spinner=False)
+def _cached_file_bytes(path_str: str, mtime: float) -> bytes:
+    return Path(path_str).read_bytes()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -254,6 +260,18 @@ def inject_app_styles() -> None:
             border-color: rgba(239, 68, 68, 0.32) !important;
             color: #ef4444 !important;
         }
+        div[data-testid="stDownloadButton"] > button {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            min-height: 32px !important;
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+            border: none !important;
+            color: white !important;
+            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
+        }
+        div[data-testid="stDownloadButton"] > button:hover {
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35) !important;
+        }
         section.main div[data-testid="stFormSubmitButton"] > button {
             border-radius: 8px !important;
             font-weight: 600 !important;
@@ -270,20 +288,54 @@ def inject_app_styles() -> None:
     )
 
 
-def _download_button_html(entry: dict, *, label: str = "Download", compact: bool = False) -> str:
+def _file_download_bytes(file_path: Path) -> bytes:
+    return _cached_file_bytes(str(file_path), file_path.stat().st_mtime)
+
+
+def _render_download_button(entry: dict, *, key: str) -> None:
     file_path = get_local_file_path(entry["stored_name"])
     if not file_path.is_file():
-        return ""
+        return
 
-    download_path = build_static_download_path(entry["stored_name"])
-    display_name = html.escape(entry.get("filename", entry["stored_name"]))
-    safe_label = html.escape(label)
-    btn_class = "btn btn-primary btn-action" if compact else "btn btn-primary btn-block"
-
-    return (
-        f'<a class="{btn_class}" href="{download_path}" '
-        f'download="{display_name}">{safe_label}</a>'
+    display_name = entry.get("filename", entry["stored_name"])
+    st.download_button(
+        label="Download",
+        data=_file_download_bytes(file_path),
+        file_name=display_name,
+        mime="application/octet-stream",
+        key=key,
+        use_container_width=True,
     )
+
+
+def maybe_render_direct_download() -> None:
+    stored_name = st.query_params.get("dl")
+    if not stored_name:
+        return
+
+    entry = find_entry_by_stored_name(stored_name)
+    if not entry:
+        st.warning("Download link is invalid or the file has been removed.")
+        return
+
+    file_path = get_local_file_path(stored_name)
+    if not file_path.is_file():
+        st.warning("File not found on server.")
+        return
+
+    filename = entry.get("filename", stored_name)
+    size_text = format_size(entry.get("size_bytes", file_path.stat().st_size))
+    st.markdown(f"Ready to download **{html.escape(filename)}** ({size_text})")
+    st.download_button(
+        label=f"Download {filename}",
+        data=_file_download_bytes(file_path),
+        file_name=filename,
+        mime="application/octet-stream",
+        type="primary",
+        use_container_width=True,
+        key=f"direct_dl_{entry['id']}",
+    )
+    st.divider()
 
 
 @st.dialog("Confirm Removal")
@@ -315,7 +367,7 @@ def render_history_item(entry: dict, base_url: str) -> None:
     filename = entry.get("filename", "Unknown file")
     safe_filename = html.escape(filename)
     safe_source = html.escape(entry.get("source_url", "-"))
-    download_url = build_download_url(f"downloads/{entry['stored_name']}", base_url)
+    download_url = build_download_url(entry["stored_name"], base_url)
     safe_download_url = html.escape(download_url)
     size_text = format_size(entry.get("size_bytes", 0))
     downloaded_at = entry.get("downloaded_at", "-")[:19].replace("T", " ") + " UTC"
@@ -340,7 +392,7 @@ def render_history_item(entry: dict, base_url: str) -> None:
 
         download_col, delete_col = st.columns([1, 0.07], gap="small")
         with download_col:
-            _render_html(_download_button_html(entry, compact=True))
+            _render_download_button(entry, key=f"dl_{entry['id']}")
         with delete_col:
             if st.button("🗑", key=f"del_{entry['id']}", help="Remove file", use_container_width=True):
                 confirm_delete_dialog(entry)
@@ -515,6 +567,7 @@ def render_sidebar(visit_stats: dict) -> None:
 
 
 def render_download_section(base_url: str) -> None:
+    maybe_render_direct_download()
     render_page_header()
 
     _render_html(

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 
@@ -150,15 +150,14 @@ def _safe_filename(name: str) -> str:
     return name[:200] if name else "downloaded_file"
 
 
-def build_download_url(relative_path: str, base_url: Optional[str] = None) -> str:
-    rel = relative_path.replace("\\", "/").lstrip("/")
+def build_download_url(stored_name: str, base_url: Optional[str] = None) -> str:
     if PUBLIC_BASE_URL:
         base = PUBLIC_BASE_URL
     elif base_url:
         base = base_url.rstrip("/")
     else:
         base = f"http://localhost:{DEFAULT_PORT}"
-    return f"{base}/app/static/{rel}"
+    return f"{base}/?dl={quote(stored_name)}"
 
 
 def get_local_file_path(stored_name: str) -> Path:
@@ -191,8 +190,16 @@ def cleanup_orphan_files() -> None:
         path.unlink(missing_ok=True)
 
 
-def build_static_download_path(stored_name: str) -> str:
-    return f"/app/static/downloads/{stored_name}"
+def find_entry_by_stored_name(stored_name: str) -> Optional[dict]:
+    if not stored_name or "/" in stored_name or "\\" in stored_name:
+        return None
+
+    for entry in load_manifest():
+        if entry.get("stored_name") == stored_name and entry.get("status") == "success":
+            path = DOWNLOADS_DIR / stored_name
+            if path.is_file():
+                return entry
+    return None
 
 
 def find_existing_entry(source_url: str) -> Optional[dict]:
@@ -213,9 +220,7 @@ def download_from_url(
 
     existing = find_existing_entry(source_url)
     if existing:
-        existing["download_url"] = build_download_url(
-            f"downloads/{existing['stored_name']}", base_url
-        )
+        existing["download_url"] = build_download_url(existing["stored_name"], base_url)
         if progress_callback:
             progress_callback(existing.get("size_bytes", 0), existing.get("size_bytes", 0))
         return existing
@@ -257,7 +262,6 @@ def download_from_url(
                 if progress_callback:
                     progress_callback(size_bytes, total_size)
 
-    relative_path = f"downloads/{stored_name}"
     entry = {
         "id": file_id,
         "source_url": source_url,
@@ -266,7 +270,7 @@ def download_from_url(
         "size_bytes": size_bytes,
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
         "status": "success",
-        "download_url": build_download_url(relative_path, base_url),
+        "download_url": build_download_url(stored_name, base_url),
     }
 
     entries = load_manifest()
