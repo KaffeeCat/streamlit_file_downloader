@@ -10,13 +10,13 @@ from download_service import (
     DEFAULT_PORT,
     MANIFEST_PATH,
     PUBLIC_BASE_URL,
-    build_download_path,
     build_download_url,
     download_from_url,
     delete_transfer,
     find_entry_by_stored_name,
     get_local_file_path,
     load_manifest,
+    read_stored_file_bytes,
     cleanup_orphan_files,
 )
 from visit_stats import load_visit_stats, record_session_visit
@@ -255,6 +255,18 @@ def inject_app_styles() -> None:
             border-color: rgba(239, 68, 68, 0.32) !important;
             color: #ef4444 !important;
         }
+        div[data-testid="stDownloadButton"] > button {
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            min-height: 32px !important;
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%) !important;
+            border: none !important;
+            color: white !important;
+            box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25) !important;
+        }
+        div[data-testid="stDownloadButton"] > button:hover {
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35) !important;
+        }
         section.main div[data-testid="stFormSubmitButton"] > button {
             border-radius: 8px !important;
             font-weight: 600 !important;
@@ -271,22 +283,31 @@ def inject_app_styles() -> None:
     )
 
 
-def _download_button_html(entry: dict, download_path: str, *, compact: bool = True) -> str:
+def _make_file_reader(stored_name: str):
+    def _read() -> bytes:
+        return read_stored_file_bytes(stored_name)
+
+    return _read
+
+
+def _render_download_button(entry: dict, *, key: str) -> None:
     file_path = get_local_file_path(entry["stored_name"])
     if not file_path.is_file():
-        return ""
+        st.caption("File unavailable on server")
+        return
 
-    display_name = html.escape(entry.get("filename", entry["stored_name"]))
-    safe_href = html.escape(download_path, quote=True)
-    btn_class = "btn btn-primary btn-action" if compact else "btn btn-primary btn-block"
-
-    return (
-        f'<a class="{btn_class}" href="{safe_href}" '
-        f'download="{display_name}">Download</a>'
+    display_name = entry.get("filename", entry["stored_name"])
+    st.download_button(
+        label="Download",
+        data=_make_file_reader(entry["stored_name"]),
+        file_name=display_name,
+        mime="application/octet-stream",
+        key=key,
+        use_container_width=True,
     )
 
 
-def maybe_render_direct_download(base_url: str) -> None:
+def maybe_render_direct_download() -> None:
     stored_name = st.query_params.get("dl")
     if not stored_name:
         return
@@ -298,18 +319,20 @@ def maybe_render_direct_download(base_url: str) -> None:
 
     file_path = get_local_file_path(stored_name)
     if not file_path.is_file():
-        st.warning("File not found on server.")
+        st.warning("File not found on server. It may have been cleared after a redeploy — please fetch it again.")
         return
 
     filename = entry.get("filename", stored_name)
     size_text = format_size(entry.get("size_bytes", file_path.stat().st_size))
-    download_url = build_download_url(stored_name, base_url)
     st.markdown(f"Ready to download **{html.escape(filename)}** ({size_text})")
-    st.link_button(
+    st.download_button(
         label=f"Download {filename}",
-        url=download_url,
+        data=_make_file_reader(stored_name),
+        file_name=filename,
+        mime="application/octet-stream",
         type="primary",
         use_container_width=True,
+        key=f"direct_dl_{entry['id']}",
     )
     st.divider()
 
@@ -368,7 +391,7 @@ def render_history_item(entry: dict, base_url: str) -> None:
 
         download_col, delete_col = st.columns([1, 0.07], gap="small")
         with download_col:
-            _render_html(_download_button_html(entry, build_download_path(entry["stored_name"])))
+            _render_download_button(entry, key=f"dl_{entry['id']}")
         with delete_col:
             if st.button("🗑", key=f"del_{entry['id']}", help="Remove file", use_container_width=True):
                 confirm_delete_dialog(entry)
@@ -543,7 +566,7 @@ def render_sidebar(visit_stats: dict) -> None:
 
 
 def render_download_section(base_url: str) -> None:
-    maybe_render_direct_download(base_url)
+    maybe_render_direct_download()
     render_page_header()
 
     _render_html(

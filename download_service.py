@@ -150,12 +150,20 @@ def _safe_filename(name: str) -> str:
     return name[:200] if name else "downloaded_file"
 
 
-def build_download_path(stored_name: str) -> str:
-    return f"/api/download/{quote(stored_name)}"
-
-
 def build_download_url(stored_name: str, base_url: Optional[str] = None) -> str:
-    path = build_download_path(stored_name)
+    """分享链接：打开应用页面后通过会话内下载，兼容 Streamlit Cloud 鉴权。"""
+    if PUBLIC_BASE_URL:
+        base = PUBLIC_BASE_URL
+    elif base_url:
+        base = base_url.rstrip("/")
+    else:
+        base = f"http://localhost:{DEFAULT_PORT}"
+    return f"{base}/?dl={quote(stored_name)}"
+
+
+def build_direct_download_url(stored_name: str, base_url: Optional[str] = None) -> str:
+    """直链下载（仅适用于公开部署、无需登录的环境）。"""
+    path = f"/api/download/{quote(stored_name)}"
     if PUBLIC_BASE_URL:
         base = PUBLIC_BASE_URL
     elif base_url:
@@ -163,6 +171,13 @@ def build_download_url(stored_name: str, base_url: Optional[str] = None) -> str:
     else:
         base = f"http://localhost:{DEFAULT_PORT}"
     return f"{base}{path}"
+
+
+def read_stored_file_bytes(stored_name: str) -> bytes:
+    file_path = _safe_download_path(stored_name)
+    if file_path is None or not file_path.is_file():
+        raise FileNotFoundError(stored_name)
+    return file_path.read_bytes()
 
 
 def get_local_file_path(stored_name: str) -> Path:
