@@ -2,6 +2,7 @@ from typing import Optional
 import html
 import os
 import textwrap
+from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -425,8 +426,92 @@ def render_server_profile(info: dict) -> None:
     )
 
 
+def patch_streamlit_index_html(ga_id: str) -> None:
+    """将 GA 代码写入 Streamlit 的 index.html <head>，供 Google 安装检测识别。"""
+    marker = f"<!-- ga4:{ga_id} -->"
+    index_path = Path(st.__file__).parent / "static" / "index.html"
+
+    try:
+        content = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    if marker in content:
+        return
+
+    ga_block = (
+        f"{marker}\n"
+        "<!-- Google tag (gtag.js) -->\n"
+        f'<script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>\n'
+        '<script id="ga-gtag-config">\n'
+        "  window.dataLayer = window.dataLayer || [];\n"
+        "  function gtag(){dataLayer.push(arguments);}\n"
+        "  gtag('js', new Date());\n"
+        f"  gtag('config', '{ga_id}');\n"
+        "</script>\n"
+    )
+
+    if "</head>" not in content:
+        return
+
+    try:
+        index_path.write_text(content.replace("</head>", f"{ga_block}</head>", 1), encoding="utf-8")
+    except OSError:
+        return
+
+
+def inject_google_analytics_runtime(ga_id: str) -> None:
+    """在主页面的 <head> 中注入 GA（Streamlit Cloud 上 index.html 可能不可写时的备用方案）。"""
+    if st.session_state.get("_ga_runtime_injected"):
+        return
+
+    st.session_state._ga_runtime_injected = True
+    safe_ga_id = html.escape(ga_id, quote=True)
+    runtime_script = f"""
+    <script>
+    (function () {{
+        var doc = document;
+        try {{
+            if (window.parent && window.parent.document && window.parent.document.head) {{
+                doc = window.parent.document;
+            }}
+        }} catch (e) {{}}
+
+        if (doc.getElementById("ga-gtag-config")) return;
+
+        var loader = doc.createElement("script");
+        loader.async = true;
+        loader.src = "https://www.googletagmanager.com/gtag/js?id={safe_ga_id}";
+        doc.head.appendChild(loader);
+
+        var config = doc.createElement("script");
+        config.id = "ga-gtag-config";
+        config.text =
+            "window.dataLayer = window.dataLayer || [];"
+            + "function gtag(){{dataLayer.push(arguments);}}"
+            + "gtag('js', new Date());"
+            + "gtag('config', '{safe_ga_id}');";
+        doc.head.appendChild(config);
+    }})();
+    </script>
+    """
+
+    if hasattr(st, "html"):
+        try:
+            st.html(runtime_script, unsafe_allow_javascript=True)
+            return
+        except TypeError:
+            st.html(runtime_script)
+            return
+
+    components.html(runtime_script, height=0, scrolling=False)
+
+
 def inject_analytics() -> None:
     """通过环境变量注入第三方统计脚本（数据保存在对应平台，不在本机记录）。"""
+    if GA_MEASUREMENT_ID:
+        inject_google_analytics_runtime(GA_MEASUREMENT_ID)
+
     snippets: list[str] = []
 
     goatcounter = os.environ.get("GOATCOUNTER_CODE", "").strip()
@@ -443,19 +528,6 @@ def inject_analytics() -> None:
         snippets.append(
             "<script defer src='https://static.cloudflareinsights.com/beacon.min.js' "
             f"data-cf-beacon='{{\"token\": \"{safe_token}\"}}'></script>"
-        )
-
-    ga_id = GA_MEASUREMENT_ID
-    if ga_id:
-        safe_ga_id = html.escape(ga_id)
-        snippets.append(
-            f"<script async src='https://www.googletagmanager.com/gtag/js?id={safe_ga_id}'></script>"
-            "<script>"
-            "window.dataLayer=window.dataLayer||[];"
-            "function gtag(){dataLayer.push(arguments);}"
-            "gtag('js',new Date());"
-            f"gtag('config','{safe_ga_id}');"
-            "</script>"
         )
 
     if snippets:
@@ -609,6 +681,9 @@ def render_download_section(base_url: str) -> None:
 
     render_transfer_history(base_url)
 
+
+if GA_MEASUREMENT_ID:
+    patch_streamlit_index_html(GA_MEASUREMENT_ID)
 
 st.set_page_config(
     page_title=APP_NAME,
