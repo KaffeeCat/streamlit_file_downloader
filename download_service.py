@@ -150,14 +150,19 @@ def _safe_filename(name: str) -> str:
     return name[:200] if name else "downloaded_file"
 
 
+def build_download_path(stored_name: str) -> str:
+    return f"/api/download/{quote(stored_name)}"
+
+
 def build_download_url(stored_name: str, base_url: Optional[str] = None) -> str:
+    path = build_download_path(stored_name)
     if PUBLIC_BASE_URL:
         base = PUBLIC_BASE_URL
     elif base_url:
         base = base_url.rstrip("/")
     else:
         base = f"http://localhost:{DEFAULT_PORT}"
-    return f"{base}/?dl={quote(stored_name)}"
+    return f"{base}{path}"
 
 
 def get_local_file_path(stored_name: str) -> Path:
