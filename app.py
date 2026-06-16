@@ -2,10 +2,8 @@ from typing import Optional
 import html
 import os
 import textwrap
-from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 import requests
 
 from download_service import (
@@ -20,18 +18,13 @@ from download_service import (
     load_manifest,
     cleanup_orphan_files,
 )
+from visit_stats import load_visit_stats, record_session_visit
 
 
 APP_NAME = "Streamlit File Downloader"
 APP_TAGLINE = "File Proxy Gateway"
 AUTHOR_NAME = "KaffeeCat"
 AUTHOR_URL = os.environ.get("AUTHOR_URL", "https://github.com/KaffeeCat").rstrip("/")
-SHOW_VISITOR_COUNTER = os.environ.get("SHOW_VISITOR_COUNTER", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-}
-GA_MEASUREMENT_ID = os.environ.get("GA_MEASUREMENT_ID", "G-EQYBHFSMPW").strip()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -72,6 +65,26 @@ def get_app_base_url() -> str:
         pass
 
     return f"http://localhost:{DEFAULT_PORT}"
+
+
+def track_visit() -> dict:
+    """每个浏览器会话只记录一次访问，写入本地 JSON。"""
+    if st.session_state.get("_visit_recorded"):
+        return load_visit_stats()
+
+    st.session_state._visit_recorded = True
+
+    host = ""
+    user_agent = ""
+    try:
+        headers = st.context.headers
+        if headers:
+            host = headers.get("Host", "")
+            user_agent = headers.get("User-Agent", "")
+    except Exception:
+        pass
+
+    return record_session_visit(host=host, user_agent=user_agent)
 
 
 def format_size(size_bytes: int) -> str:
@@ -426,117 +439,14 @@ def render_server_profile(info: dict) -> None:
     )
 
 
-def patch_streamlit_index_html(ga_id: str) -> None:
-    """将 GA 代码写入 Streamlit 的 index.html <head>，供 Google 安装检测识别。"""
-    marker = f"<!-- ga4:{ga_id} -->"
-    index_path = Path(st.__file__).parent / "static" / "index.html"
-
-    try:
-        content = index_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-
-    if marker in content:
-        return
-
-    ga_block = (
-        f"{marker}\n"
-        "<!-- Google tag (gtag.js) -->\n"
-        f'<script async src="https://www.googletagmanager.com/gtag/js?id={ga_id}"></script>\n'
-        '<script id="ga-gtag-config">\n'
-        "  window.dataLayer = window.dataLayer || [];\n"
-        "  function gtag(){dataLayer.push(arguments);}\n"
-        "  gtag('js', new Date());\n"
-        f"  gtag('config', '{ga_id}');\n"
-        "</script>\n"
-    )
-
-    if "</head>" not in content:
-        return
-
-    try:
-        index_path.write_text(content.replace("</head>", f"{ga_block}</head>", 1), encoding="utf-8")
-    except OSError:
-        return
-
-
-def inject_google_analytics_runtime(ga_id: str) -> None:
-    """在主页面的 <head> 中注入 GA（Streamlit Cloud 上 index.html 可能不可写时的备用方案）。"""
-    if st.session_state.get("_ga_runtime_injected"):
-        return
-
-    st.session_state._ga_runtime_injected = True
-    safe_ga_id = html.escape(ga_id, quote=True)
-    runtime_script = f"""
-    <script>
-    (function () {{
-        var doc = document;
-        try {{
-            if (window.parent && window.parent.document && window.parent.document.head) {{
-                doc = window.parent.document;
-            }}
-        }} catch (e) {{}}
-
-        if (doc.getElementById("ga-gtag-config")) return;
-
-        var loader = doc.createElement("script");
-        loader.async = true;
-        loader.src = "https://www.googletagmanager.com/gtag/js?id={safe_ga_id}";
-        doc.head.appendChild(loader);
-
-        var config = doc.createElement("script");
-        config.id = "ga-gtag-config";
-        config.text =
-            "window.dataLayer = window.dataLayer || [];"
-            + "function gtag(){{dataLayer.push(arguments);}}"
-            + "gtag('js', new Date());"
-            + "gtag('config', '{safe_ga_id}');";
-        doc.head.appendChild(config);
-    }})();
-    </script>
-    """
-
-    if hasattr(st, "html"):
-        try:
-            st.html(runtime_script, unsafe_allow_javascript=True)
-            return
-        except TypeError:
-            st.html(runtime_script)
-            return
-
-    components.html(runtime_script, height=0, scrolling=False)
-
-
-def inject_analytics() -> None:
-    """通过环境变量注入第三方统计脚本（数据保存在对应平台，不在本机记录）。"""
-    if GA_MEASUREMENT_ID:
-        inject_google_analytics_runtime(GA_MEASUREMENT_ID)
-
-    snippets: list[str] = []
-
-    goatcounter = os.environ.get("GOATCOUNTER_CODE", "").strip()
-    if goatcounter:
-        safe_code = html.escape(goatcounter)
-        snippets.append(
-            f'<script data-goatcounter="https://{safe_code}.goatcounter.com/count" '
-            f'async src="//gc.zgo.at/count.js"></script>'
-        )
-
-    cf_token = os.environ.get("CLOUDFLARE_ANALYTICS_TOKEN", "").strip()
-    if cf_token:
-        safe_token = html.escape(cf_token)
-        snippets.append(
-            "<script defer src='https://static.cloudflareinsights.com/beacon.min.js' "
-            f"data-cf-beacon='{{\"token\": \"{safe_token}\"}}'></script>"
-        )
-
-    if snippets:
-        components.html("\n".join(snippets), height=0, scrolling=False)
-
-
-def render_sidebar_footer() -> None:
+def render_sidebar_footer(visit_stats: dict) -> None:
     safe_author = html.escape(AUTHOR_NAME)
     safe_author_url = html.escape(AUTHOR_URL, quote=True)
+    total_sessions = visit_stats.get("total_sessions", 0)
+    last_visit = visit_stats.get("last_visit_at")
+    last_visit_text = (
+        last_visit[:19].replace("T", " ") + " UTC" if last_visit else "—"
+    )
 
     _render_html(
         f"""
@@ -552,27 +462,18 @@ def render_sidebar_footer() -> None:
                     {safe_author}
                 </a>
             </div>
-        </div>
-        """
-    )
-
-    if SHOW_VISITOR_COUNTER:
-        components.html(
-            """
             <div style="margin-top:0.85rem;font-size:0.78rem;line-height:1.55;
                         color:rgba(128,128,128,0.95);">
                 <div style="font-size:0.68rem;font-weight:600;text-transform:uppercase;
                             letter-spacing:0.08em;margin-bottom:0.35rem;">
                     Site Traffic
                 </div>
-                <div>Total visits · <span id="busuanzi_value_site_pv">—</span></div>
-                <div>Unique visitors · <span id="busuanzi_value_site_uv">—</span></div>
+                <div>Total visits · {total_sessions}</div>
+                <div>Last visit · {html.escape(last_visit_text)}</div>
             </div>
-            <script async src="https://busuanzi.ibruogart.com/busuanzi/2.3/busuanzi.pure.mini.js"></script>
-            """,
-            height=78,
-            scrolling=False,
-        )
+        </div>
+        """
+    )
 
 
 def render_sidebar_header() -> None:
@@ -594,7 +495,7 @@ def render_sidebar_header() -> None:
     )
 
 
-def render_sidebar() -> None:
+def render_sidebar(visit_stats: dict) -> None:
     with st.sidebar:
         render_sidebar_header()
 
@@ -610,7 +511,7 @@ def render_sidebar() -> None:
         except RuntimeError as e:
             st.error(str(e))
 
-        render_sidebar_footer()
+        render_sidebar_footer(visit_stats)
 
 
 def render_download_section(base_url: str) -> None:
@@ -682,9 +583,6 @@ def render_download_section(base_url: str) -> None:
     render_transfer_history(base_url)
 
 
-if GA_MEASUREMENT_ID:
-    patch_streamlit_index_html(GA_MEASUREMENT_ID)
-
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="📥",
@@ -693,7 +591,7 @@ st.set_page_config(
 )
 
 inject_app_styles()
-inject_analytics()
 cleanup_orphan_files()
-render_sidebar()
+visit_stats = track_visit()
+render_sidebar(visit_stats)
 render_download_section(get_app_base_url())
