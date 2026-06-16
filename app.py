@@ -1,8 +1,10 @@
 from typing import Optional
 import html
+import os
 import textwrap
 
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 
 from download_service import (
@@ -21,6 +23,14 @@ from download_service import (
 
 APP_NAME = "Streamlit File Downloader"
 APP_TAGLINE = "File Proxy Gateway"
+AUTHOR_NAME = "KaffeeCat"
+AUTHOR_URL = os.environ.get("AUTHOR_URL", "https://github.com/KaffeeCat").rstrip("/")
+SHOW_VISITOR_COUNTER = os.environ.get("SHOW_VISITOR_COUNTER", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+GA_MEASUREMENT_ID = os.environ.get("GA_MEASUREMENT_ID", "G-EQYBHFSMPW").strip()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -415,6 +425,84 @@ def render_server_profile(info: dict) -> None:
     )
 
 
+def inject_analytics() -> None:
+    """通过环境变量注入第三方统计脚本（数据保存在对应平台，不在本机记录）。"""
+    snippets: list[str] = []
+
+    goatcounter = os.environ.get("GOATCOUNTER_CODE", "").strip()
+    if goatcounter:
+        safe_code = html.escape(goatcounter)
+        snippets.append(
+            f'<script data-goatcounter="https://{safe_code}.goatcounter.com/count" '
+            f'async src="//gc.zgo.at/count.js"></script>'
+        )
+
+    cf_token = os.environ.get("CLOUDFLARE_ANALYTICS_TOKEN", "").strip()
+    if cf_token:
+        safe_token = html.escape(cf_token)
+        snippets.append(
+            "<script defer src='https://static.cloudflareinsights.com/beacon.min.js' "
+            f"data-cf-beacon='{{\"token\": \"{safe_token}\"}}'></script>"
+        )
+
+    ga_id = GA_MEASUREMENT_ID
+    if ga_id:
+        safe_ga_id = html.escape(ga_id)
+        snippets.append(
+            f"<script async src='https://www.googletagmanager.com/gtag/js?id={safe_ga_id}'></script>"
+            "<script>"
+            "window.dataLayer=window.dataLayer||[];"
+            "function gtag(){dataLayer.push(arguments);}"
+            "gtag('js',new Date());"
+            f"gtag('config','{safe_ga_id}');"
+            "</script>"
+        )
+
+    if snippets:
+        components.html("\n".join(snippets), height=0, scrolling=False)
+
+
+def render_sidebar_footer() -> None:
+    safe_author = html.escape(AUTHOR_NAME)
+    safe_author_url = html.escape(AUTHOR_URL, quote=True)
+
+    _render_html(
+        f"""
+        <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid rgba(128,128,128,0.2);">
+            <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;
+                        letter-spacing:0.1em;color:rgba(128,128,128,0.95);margin-bottom:0.45rem;">
+                About
+            </div>
+            <div style="font-size:0.88rem;line-height:1.5;color:rgba(128,128,128,0.95);">
+                Built by
+                <a href="{safe_author_url}" target="_blank" rel="noopener noreferrer"
+                   style="color:#2563eb;font-weight:600;text-decoration:none;">
+                    {safe_author}
+                </a>
+            </div>
+        </div>
+        """
+    )
+
+    if SHOW_VISITOR_COUNTER:
+        components.html(
+            """
+            <div style="margin-top:0.85rem;font-size:0.78rem;line-height:1.55;
+                        color:rgba(128,128,128,0.95);">
+                <div style="font-size:0.68rem;font-weight:600;text-transform:uppercase;
+                            letter-spacing:0.08em;margin-bottom:0.35rem;">
+                    Site Traffic
+                </div>
+                <div>Total visits · <span id="busuanzi_value_site_pv">—</span></div>
+                <div>Unique visitors · <span id="busuanzi_value_site_uv">—</span></div>
+            </div>
+            <script async src="https://busuanzi.ibruogart.com/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+            """,
+            height=78,
+            scrolling=False,
+        )
+
+
 def render_sidebar_header() -> None:
     _render_html(
         """
@@ -449,6 +537,8 @@ def render_sidebar() -> None:
             st.error(f"网络请求失败：{e}")
         except RuntimeError as e:
             st.error(str(e))
+
+        render_sidebar_footer()
 
 
 def render_download_section(base_url: str) -> None:
@@ -528,6 +618,7 @@ st.set_page_config(
 )
 
 inject_app_styles()
+inject_analytics()
 cleanup_orphan_files()
 render_sidebar()
 render_download_section(get_app_base_url())
